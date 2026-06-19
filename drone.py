@@ -20,7 +20,7 @@ import random
 SAMPLE_RATE = 48000
 BLOCK_SIZE = 512
 CHANNELS = 2
-MASTER_GAIN = 0.3
+MASTER_GAIN = 0.4
 FADE_IN = 3.0
 
 # ── 1. Drone bed (гул) ──────────────────────────────────────────────────────
@@ -30,10 +30,11 @@ BINAURAL_OFFSET = 0.4
 
 DRONE_HARMONICS = [
     # (harmonic, amp, L_gain, R_gain)
-    (1,  0.06, 1.0, 1.0),     #  55 Hz — faint sub presence
-    (2,  0.60, 1.0, 1.0),     # 110 Hz — dominant, clean
-    (3,  0.08, 1.0, 1.0),     # 165 Hz — subtle body
-    (4,  0.04, 1.0, 1.0),     # 220 Hz — faint overtone
+    (1,  0.02, 1.0, 1.0),     #  55 Hz — minimal low
+    (2,  0.15, 1.0, 1.0),     # 110 Hz — dominant
+    (3,  0.06, 1.0, 1.0),     # 165 Hz
+    (4,  0.03, 1.0, 1.0),     # 220 Hz
+    (5,  0.015, 1.0, 1.0),    # 275 Hz
 ]
 
 DRONE_LFO_FREQ = 0.001          # barely perceptible drift
@@ -58,13 +59,20 @@ VIBE_PAN_R = 1.0              # hard right
 #
 # Pattern: each "phrase" visits 4-5 harmonics in gentle arcs.
 MELODY_HARMONICS = [2, 3, 4, 5, 6]  # harmonic numbers (×55 Hz)
-MELODY_AMP = 0.12                     # audible but blends with drone
-MELODY_NOTE_MIN = 4.0                 # seconds per note
-MELODY_NOTE_MAX = 8.0
-MELODY_XFADE = 1.5                    # smooth transition between notes
-MELODY_PAN = -0.2                     # slightly left
-MELODY_VIBRATO_FREQ = 0.12            # gentle waver
-MELODY_VIBRATO_DEPTH = 0.5            # Hz
+MELODY_AMP = 0.10                     # per-voice amp (× ensemble size)
+MELODY_NOTE_MIN = 6.0
+MELODY_NOTE_MAX = 14.0
+MELODY_XFADE = 2.0
+MELODY_VIBRATO_FREQ = 0.0
+MELODY_VIBRATO_DEPTH = 0.0
+MELODY_HARMONIC_RICHNESS = 0.0
+MELODY_PAN = 0.0
+
+# Ensemble/choir effect — each melody note is N detuned voices
+# creating a soft pad timbre instead of pure sine.
+MELODY_ENSEMBLE = 4                   # voices per note
+MELODY_DETUNE_SPREAD = 0.6            # Hz — total spread across ensemble
+MELODY_STEREO_SPREAD = 0.8            # pan spread across ensemble
 
 
 # ── Build voices ─────────────────────────────────────────────────────────────
@@ -105,7 +113,8 @@ class MelodyScheduler:
     """
 
     def __init__(self, harmonics, fundamental, note_min, note_max, xfade,
-                 amp, pan, vibrato_freq, vibrato_depth, sample_rate):
+                 amp, pan, vibrato_freq, vibrato_depth, harmonic_richness,
+                 sample_rate):
         self.harmonics = harmonics
         self.fundamental = fundamental
         self.note_min = note_min
@@ -115,6 +124,7 @@ class MelodyScheduler:
         self.pan = pan
         self.vibrato_freq = vibrato_freq
         self.vibrato_depth = vibrato_depth
+        self.harmonic_richness = harmonic_richness
         self.sample_rate = sample_rate
         self.rng = random.Random(42)
 
@@ -125,27 +135,21 @@ class MelodyScheduler:
         self.to_freq = fundamental * self.to_h
         self.transition_start_sample = 0
         self.transition_duration = int(xfade * sample_rate)
-        self.direction = 1
         self._schedule_next(0)
 
     def _schedule_next(self, current_sample):
-        """Pick next harmonic and set up frequency glide."""
-        # Current note holds for a while, then glide starts
+        """Pick next harmonic — random walk with occasional leaps."""
         hold_duration = self.rng.uniform(self.note_min, self.note_max)
         self.transition_start_sample = current_sample + int(hold_duration * self.sample_rate)
 
-        # Next harmonic
+        # Random walk: step ±1 or ±2, stay in bounds, occasionally leap
         old_idx = self.harmonics.index(self.to_h)
-        new_idx = old_idx + self.direction
-        if new_idx >= len(self.harmonics):
-            new_idx = len(self.harmonics) - 2
-            self.direction = -1
-        elif new_idx < 0:
-            new_idx = 1
-            self.direction = 1
+        step = self.rng.choice([-2, -1, 1, 2])
+        # 20% chance of larger leap
         if self.rng.random() < 0.2:
-            new_idx = new_idx + self.direction
-            new_idx = max(0, min(len(self.harmonics) - 1, new_idx))
+            step = self.rng.choice([-3, -2, 2, 3])
+        new_idx = old_idx + step
+        new_idx = max(0, min(len(self.harmonics) - 1, new_idx))
 
         self.from_h = self.to_h
         self.from_freq = self.fundamental * self.from_h
@@ -182,13 +186,16 @@ def signal_handler(sig, frame):
 
 class Engine:
     def __init__(self, drone_voices, vibe_voices, melody, sample_rate,
-                 block_size, master_gain, fade_in):
+                 block_size, master_gain, fade_in, ensemble_size,
+                 detune_spread, stereo_spread):
         self.sr = sample_rate
         self.bs = block_size
         self.master_gain = master_gain
         self.melody = melody
         self.fade_in_samples = int(fade_in * sample_rate)
         self.sample_count = 0
+        self.ensemble_size = ensemble_size
+        self.detune_spread = detune_spread
 
         self.all_voices = drone_voices + vibe_voices
         rng = np.random.default_rng()
@@ -203,10 +210,23 @@ class Engine:
             self.pans[i, 0] = np.cos(angle)
             self.pans[i, 1] = np.sin(angle)
 
-        mp = melody.pan
-        angle = (mp + 1.0) * np.pi / 4.0
-        self.mp_l, self.mp_r = np.cos(angle), np.sin(angle)
-        self.m_osc_phase = rng.uniform(0, 2 * np.pi)
+        # Ensemble melody: N voices with detuning and stereo spread
+        self.m_phases = rng.uniform(0, 2 * np.pi, ensemble_size)
+        # Detune offsets: evenly spread across [-spread/2, +spread/2]
+        self.m_detunes = np.linspace(-detune_spread / 2, detune_spread / 2,
+                                      ensemble_size)
+        # Pan per ensemble voice
+        base_pan = melody.pan if hasattr(melody, 'pan') else 0.0
+        self.m_pans = np.zeros((ensemble_size, 2), dtype=np.float32)
+        for i in range(ensemble_size):
+            t = ensemble_size - 1
+            offset = 0.0 if t == 0 else (-stereo_spread / 2
+                                         + i * stereo_spread / t)
+            pan = base_pan + offset
+            angle = (np.clip(pan, -1.0, 1.0) + 1.0) * np.pi / 4.0
+            self.m_pans[i, 0] = np.cos(angle)
+            self.m_pans[i, 1] = np.sin(angle)
+
         self.m_vib_phase = rng.uniform(0, 2 * np.pi)
 
     def process_block(self, outdata, frames, time_info, status):
@@ -236,30 +256,32 @@ class Engine:
             block[:, 0] += self.pans[i, 0] * mono
             block[:, 1] += self.pans[i, 1] * mono
 
-        # Melody — single voice with frequency glide + vibrato
-        # Build per-sample frequency: start freq, end freq, linear interp
+        # Melody ensemble — N detuned voices with stereo spread, pad timbre
         f_start = self.melody.get_freq(self.sample_count)
         f_end = self.melody.get_freq(self.sample_count + frames - 1)
         base_freqs = np.linspace(f_start, f_end, frames, dtype=np.float64)
 
-        # Vibrato
-        idx_m = np.arange(self.sample_count, self.sample_count + frames,
-                          dtype=np.float64)
-        vibrato = np.sin(2.0 * np.pi * self.melody.vibrato_freq * idx_m / self.sr
-                         + self.m_vib_phase)
-        self.m_vib_phase += (2.0 * np.pi * self.melody.vibrato_freq
-                             * frames / self.sr)
+        for ev in range(self.ensemble_size):
+            freqs = base_freqs + self.m_detunes[ev]
 
-        freqs = base_freqs + self.melody.vibrato_depth * vibrato
+            if self.melody.vibrato_depth > 0:
+                idx_m = np.arange(self.sample_count, self.sample_count + frames,
+                                  dtype=np.float64)
+                vibrato = np.sin(2.0 * np.pi * self.melody.vibrato_freq * idx_m / self.sr
+                                 + self.m_vib_phase)
+                freqs = freqs + self.melody.vibrato_depth * vibrato
 
-        # Phase accumulation
-        pinc = 2.0 * np.pi * freqs / self.sr
-        phases = self.m_osc_phase + np.cumsum(pinc)
-        self.m_osc_phase = phases[-1]
+            pinc = 2.0 * np.pi * freqs / self.sr
+            phases = self.m_phases[ev] + np.cumsum(pinc)
+            self.m_phases[ev] = phases[-1]
 
-        melody_mono = self.melody.amp * np.sin(phases).astype(np.float32)
-        block[:, 0] += self.mp_l * melody_mono
-        block[:, 1] += self.mp_r * melody_mono
+            mono = self.melody.amp * np.sin(phases).astype(np.float32)
+            block[:, 0] += self.m_pans[ev, 0] * mono
+            block[:, 1] += self.m_pans[ev, 1] * mono
+
+        if self.melody.vibrato_depth > 0:
+            self.m_vib_phase += (2.0 * np.pi * self.melody.vibrato_freq
+                                 * frames / self.sr)
 
         # Output
         if self.sample_count < self.fade_in_samples:
@@ -283,6 +305,7 @@ def main():
         pan=MELODY_PAN,
         vibrato_freq=MELODY_VIBRATO_FREQ,
         vibrato_depth=MELODY_VIBRATO_DEPTH,
+        harmonic_richness=MELODY_HARMONIC_RICHNESS,
         sample_rate=SAMPLE_RATE,
     )
 
@@ -291,6 +314,7 @@ def main():
     print(f"  2. Binaural vibe: {len(vibe)} voices hard-panned L/R")
     print(f"  3. Melody: harmonics {MELODY_HARMONICS} of {FUNDAMENTAL:.0f} Hz")
     print(f"     Notes: {MELODY_NOTE_MIN}-{MELODY_NOTE_MAX}s, crossfade {MELODY_XFADE}s")
+    print(f"     Ensemble: {MELODY_ENSEMBLE} voices, detune {MELODY_DETUNE_SPREAD} Hz, stereo spread {MELODY_STEREO_SPREAD}")
     print(f"  Press Ctrl+C to stop\n")
     print("Starting...")
 
@@ -302,6 +326,9 @@ def main():
         block_size=BLOCK_SIZE,
         master_gain=MASTER_GAIN,
         fade_in=FADE_IN,
+        ensemble_size=MELODY_ENSEMBLE,
+        detune_spread=MELODY_DETUNE_SPREAD,
+        stereo_spread=MELODY_STEREO_SPREAD,
     )
 
     signal.signal(signal.SIGINT, signal_handler)
