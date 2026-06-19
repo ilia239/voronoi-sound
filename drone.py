@@ -29,19 +29,16 @@ FUNDAMENTAL = 55.0
 BINAURAL_OFFSET = 0.4
 
 DRONE_HARMONICS = [
-    # (harmonic, amp, L_gain, R_gain) — subtle stereo spread
-    (1,  0.08, 1.0, 1.0),     #  55 Hz
-    (2,  0.60, 1.0, 1.0),     # 110 Hz — dominant
-    (3,  0.10, 0.6, 1.0),     # 165 Hz
-    (4,  0.06, 1.0, 0.5),     # 220 Hz
-    (5,  0.04, 0.8, 0.8),     # 275 Hz
-    (6,  0.03, 0.5, 1.0),     # 330 Hz
-    (7,  0.02, 1.0, 0.4),     # 385 Hz
+    # (harmonic, amp, L_gain, R_gain)
+    (1,  0.06, 1.0, 1.0),     #  55 Hz — faint sub presence
+    (2,  0.60, 1.0, 1.0),     # 110 Hz — dominant, clean
+    (3,  0.08, 1.0, 1.0),     # 165 Hz — subtle body
+    (4,  0.04, 1.0, 1.0),     # 220 Hz — faint overtone
 ]
 
-DRONE_LFO_FREQ = 0.003
-DRONE_LFO_AMP = 0.12
-DRONE_LFO_PITCH = 0.03
+DRONE_LFO_FREQ = 0.001          # barely perceptible drift
+DRONE_LFO_AMP = 0.04            # minimal amplitude variation
+DRONE_LFO_PITCH = 0.01          # minimal pitch variation
 
 # ── 2. Binaural vibration layer (вибрация) ──────────────────────────────────
 
@@ -73,25 +70,19 @@ MELODY_VIBRATO_DEPTH = 0.5            # Hz
 # ── Build voices ─────────────────────────────────────────────────────────────
 
 def build_drone_voices():
+    """Clean drone bed — no binaural detuning, minimal LFO. Just pure tones."""
     voices = []
     rng = np.random.default_rng(seed=42)
     for h, amp, gl, gr in DRONE_HARMONICS:
         f = FUNDAMENTAL * h
+        # Slight stereo spread through panning, not frequency offset
         voices.append({
-            "freq": f - BINAURAL_OFFSET / 2,
+            "freq": f,
             "amp": 0.35 * amp * gl,
-            "pan": -0.7,
-            "lfo_f": DRONE_LFO_FREQ + rng.uniform(0, 0.002),
-            "lfo_amp": DRONE_LFO_AMP * rng.uniform(0.3, 1.0),
-            "lfo_pitch": DRONE_LFO_PITCH * rng.uniform(0.3, 1.0),
-        })
-        voices.append({
-            "freq": f + BINAURAL_OFFSET / 2,
-            "amp": 0.35 * amp * gr,
-            "pan": 0.7,
-            "lfo_f": DRONE_LFO_FREQ + rng.uniform(0, 0.002),
-            "lfo_amp": DRONE_LFO_AMP * rng.uniform(0.3, 1.0),
-            "lfo_pitch": DRONE_LFO_PITCH * rng.uniform(0.3, 1.0),
+            "pan": 0.0,  # centered — clean drone fills the room evenly
+            "lfo_f": DRONE_LFO_FREQ + rng.uniform(0, 0.001),
+            "lfo_amp": DRONE_LFO_AMP * rng.uniform(0.2, 1.0),
+            "lfo_pitch": DRONE_LFO_PITCH * rng.uniform(0.2, 1.0),
         })
     return voices
 
